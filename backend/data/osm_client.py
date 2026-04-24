@@ -4,8 +4,11 @@ import logging
 from typing import Optional, Tuple
 
 import geopandas as gpd
+from pyproj import Transformer
+from shapely.ops import transform
 
 logger = logging.getLogger(__name__)
+METRIC_CRS = "EPSG:3857"
 
 POI_TAGS = {
     "amenity": ["restaurant", "cafe", "bar", "fast_food", "cinema",
@@ -43,7 +46,13 @@ def fetch_city_pois(city_name: str) -> gpd.GeoDataFrame:
         return "other"
 
     gdf["poi_type"] = gdf.apply(resolve_type, axis=1)
-    gdf["geometry"] = gdf.geometry.centroid
+    source_crs = gdf.crs or "EPSG:4326"
+    metric_gdf = gdf.to_crs(METRIC_CRS)
+    to_source_crs = Transformer.from_crs(METRIC_CRS, source_crs, always_xy=True)
+    centroids = metric_gdf.geometry.centroid.apply(
+        lambda geom: transform(to_source_crs.transform, geom)
+    )
+    gdf = gdf.set_geometry(centroids, crs=source_crs)
     return gdf[["geometry", "poi_type"]].reset_index(drop=True)
 
 
@@ -75,7 +84,7 @@ def get_city_bounds(city_name: str) -> Optional[Tuple[float, float, float, float
             "mumbai": (72.77, 18.89, 72.99, 19.27),
             "delhi": (76.84, 28.40, 77.35, 28.88),
             "bangalore": (77.46, 12.83, 77.78, 13.14),
-            # "pilani": (75.58, 28.35, 75.65, 28.40),
+            "pilani": (75.58, 28.35, 75.65, 28.40),
         }
         key = city_name.lower().split(",")[0].strip()
         if key in fallbacks:

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import geopandas as gpd
 import h3
@@ -32,17 +32,42 @@ logger = logging.getLogger(__name__)
 # Domain knowledge encoded as heuristic weights — used to generate synthetic
 # training labels. In production, replace with real store revenue labels.
 # ---------------------------------------------------------------------------
+# STORE_TYPE_WEIGHTS: Dict[str, Dict[str, float]] = {
+#     "restaurant": {"population": 0.30, "poi_synergy": 0.25, "competitor_penalty": 0.15,
+#                    "connectivity": 0.15, "commercial": 0.15},
+#     "theater":    {"population": 0.25, "poi_synergy": 0.30, "competitor_penalty": 0.10,
+#                    "connectivity": 0.25, "commercial": 0.10},
+#     "mall":       {"population": 0.35, "poi_synergy": 0.10, "competitor_penalty": 0.20,
+#                    "connectivity": 0.25, "commercial": 0.10},
+#     "cafe":       {"population": 0.25, "poi_synergy": 0.25, "competitor_penalty": 0.20,
+#                    "connectivity": 0.10, "commercial": 0.20},
+#     "grocery":    {"population": 0.40, "poi_synergy": 0.10, "competitor_penalty": 0.25,
+#                    "connectivity": 0.15, "commercial": 0.10},
+# }
+
+from typing import Dict
+
 STORE_TYPE_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "restaurant": {"population": 0.30, "poi_synergy": 0.25, "competitor_penalty": 0.15,
-                   "connectivity": 0.15, "commercial": 0.15},
+    # Data sourced from image: Heavy reliance on commercial zones (35%) and visibility/synergy (25%)
+    "restaurant": {"population": 0.15, "poi_synergy": 0.25, "competitor_penalty": 0.10,
+                   "connectivity": 0.15, "commercial": 0.35},
+                   
+    # Researched Data: Entertainment anchors need high connectivity (25%) for ingress/egress 
+    # and strong synergy with dining/nightlife (30%).
     "theater":    {"population": 0.25, "poi_synergy": 0.30, "competitor_penalty": 0.10,
                    "connectivity": 0.25, "commercial": 0.10},
-    "mall":       {"population": 0.35, "poi_synergy": 0.10, "competitor_penalty": 0.20,
+                   
+    # Data sourced from image: Highly dependent on road connectivity (35%) and population density (30%)
+    "mall":       {"population": 0.30, "poi_synergy": 0.15, "competitor_penalty": 0.05,
+                   "connectivity": 0.35, "commercial": 0.15},
+                   
+    # Data sourced from image: Requires a balance of connectivity (30%) and visibility/synergy (25%)
+    "cafe":       {"population": 0.15, "poi_synergy": 0.25, "competitor_penalty": 0.10,
+                   "connectivity": 0.30, "commercial": 0.20},
+                   
+    # Data sourced from image: Dominated by residential proximity/population (40%) and connectivity (25%)
+    "grocery":    {"population": 0.40, "poi_synergy": 0.15, "competitor_penalty": 0.10,
                    "connectivity": 0.25, "commercial": 0.10},
-    "cafe":       {"population": 0.25, "poi_synergy": 0.25, "competitor_penalty": 0.20,
-                   "connectivity": 0.10, "commercial": 0.20},
-    "grocery":    {"population": 0.40, "poi_synergy": 0.10, "competitor_penalty": 0.25,
-                   "connectivity": 0.15, "commercial": 0.10},
 }
 
 SYNERGY_MAP: Dict[str, Dict[str, List[str]]] = {
@@ -60,6 +85,7 @@ SYNERGY_MAP: Dict[str, Dict[str, List[str]]] = {
 
 FEATURE_COLS = ["population", "poi_synergy", "competitor_penalty",
                 "connectivity", "commercial"]
+METRIC_CRS = "EPSG:3857"
 
 
 @dataclass
@@ -156,6 +182,16 @@ class ScoringEngine:
             self._models[store_type] = MLScoringModel(store_type)
         return self._models[store_type]
 
+    def _center_distances_in_meters(self, grid: gpd.GeoDataFrame) -> pd.Series:
+        """Measure cell-centroid distance from the grid center in a projected CRS."""
+        grid_metric = grid.to_crs(METRIC_CRS)
+        metric_geometry = grid_metric.geometry
+        try:
+            city_center = metric_geometry.union_all().centroid
+        except AttributeError:
+            city_center = metric_geometry.unary_union.centroid
+        return metric_geometry.centroid.distance(city_center)
+
     # -------------------- Grid --------------------
     def build_hex_grid(self, bounds: CityBounds) -> gpd.GeoDataFrame:
         poly_geojson = mapping(bounds.to_polygon())
@@ -189,16 +225,22 @@ class ScoringEngine:
 
     # -------------------- Feature extraction --------------------
     def compute_population_feature(
-        self, grid: gpd.GeoDataFrame, population_gdf: Optional[gpd.GeoDataFrame]
+        self,
+        grid: gpd.GeoDataFrame,
+        population_gdf: Optional[Union[pd.DataFrame, gpd.GeoDataFrame]],
     ) -> pd.Series:
         if population_gdf is None or population_gdf.empty:
-            city_center = grid.geometry.unary_union.centroid
-            dists = grid.geometry.centroid.distance(city_center)
+            dists = self._center_distances_in_meters(grid)
             mock = np.exp(-dists / max(dists.max(), 1e-9) * 2.5) * 10000
             # add noise so it's not too clean
             rng = np.random.RandomState(0)
             mock = mock * (0.7 + 0.6 * rng.random(len(mock)))
             return pd.Series(mock.values, index=grid["hex_id"])
+
+        if "hex_id" in population_gdf.columns:
+            return population_gdf.groupby("hex_id")["population"].sum().reindex(
+                grid["hex_id"], fill_value=0
+            )
 
         joined = gpd.sjoin(population_gdf, grid, how="inner", predicate="within")
         return joined.groupby("hex_id")["population"].sum().reindex(
@@ -215,8 +257,7 @@ class ScoringEngine:
             rng = np.random.RandomState(1)
             # mock: synergy higher near center, competition spread more evenly
             n = len(grid)
-            center = grid.geometry.unary_union.centroid
-            d = grid.geometry.centroid.distance(center).values
+            d = self._center_distances_in_meters(grid).values
             d_norm = d / max(d.max(), 1e-9)
             synergy = (1 - d_norm) * rng.uniform(5, 30, n)
             comp = rng.uniform(0, 15, n)
@@ -240,8 +281,7 @@ class ScoringEngine:
         if road_gdf is None or road_gdf.empty:
             rng = np.random.RandomState(2)
             # mock: mild radial pattern + noise
-            center = grid.geometry.unary_union.centroid
-            d = grid.geometry.centroid.distance(center).values
+            d = self._center_distances_in_meters(grid).values
             d_norm = d / max(d.max(), 1e-9)
             vals = (1 - 0.6 * d_norm) * rng.uniform(0.5, 1.5, len(grid))
             return pd.Series(vals, index=grid["hex_id"])
@@ -260,8 +300,7 @@ class ScoringEngine:
     ) -> pd.Series:
         if pois_gdf is None or pois_gdf.empty:
             rng = np.random.RandomState(3)
-            center = grid.geometry.unary_union.centroid
-            d = grid.geometry.centroid.distance(center).values
+            d = self._center_distances_in_meters(grid).values
             d_norm = d / max(d.max(), 1e-9)
             vals = (1 - 0.7 * d_norm) * rng.uniform(0, 20, len(grid))
             return pd.Series(vals, index=grid["hex_id"])
@@ -300,7 +339,7 @@ class ScoringEngine:
         store_type: str,
         pois_gdf: Optional[gpd.GeoDataFrame] = None,
         roads_gdf: Optional[gpd.GeoDataFrame] = None,
-        population_gdf: Optional[gpd.GeoDataFrame] = None,
+        population_gdf: Optional[Union[pd.DataFrame, gpd.GeoDataFrame]] = None,
     ) -> Dict:
         if store_type not in STORE_TYPE_WEIGHTS:
             raise ValueError(f"Unknown store_type '{store_type}'. "

@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from data.osm_client import fetch_city_pois, fetch_city_roads, get_city_bounds
+from data.population_client import fetch_city_population
 from scoring.engine import CityBounds, ScoringEngine, STORE_TYPE_WEIGHTS
 
 
@@ -80,6 +81,18 @@ def analyze(req: AnalyzeRequest):
         )
     bounds = CityBounds(*bounds_tuple)
 
+    engine.h3_resolution = req.resolution or 8
+
+    population = None
+    population_source = "mock"
+    try:
+        population = fetch_city_population(req.city, bounds_tuple, engine.h3_resolution)
+        if population is not None and not population.empty:
+            population_source = "worldpop"
+    except Exception:
+        logger.exception("Population load failed; falling back to mock population")
+        population = None
+
     if req.use_osm:
         pois = fetch_city_pois(req.city)
         roads = fetch_city_roads(req.city)
@@ -90,14 +103,13 @@ def analyze(req: AnalyzeRequest):
         roads = gpd.GeoDataFrame(columns=["geometry", "highway"], crs="EPSG:4326")
         logger.info("Skipping OSM — using mock data")
 
-    engine.h3_resolution = req.resolution or 8
     try:
         result = engine.score_city(
             bounds=bounds,
             store_type=req.store_type,
             pois_gdf=pois if not pois.empty else None,
             roads_gdf=roads if not roads.empty else None,
-            population_gdf=None,
+            population_gdf=population if population is not None and not population.empty else None,
         )
     except Exception as e:
         logger.exception("Scoring failed")
@@ -115,6 +127,7 @@ def analyze(req: AnalyzeRequest):
         "feature_importances": result["feature_importances"],
         "geojson": result["geojson"],
         "weights_used": STORE_TYPE_WEIGHTS[req.store_type],
+        "population_source": population_source,
     }
 
 

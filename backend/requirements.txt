@@ -9,4 +9,6 @@ scikit-learn==1.5.2
 h3==4.1.2
 osmnx==2.0.1
 requests==2.32.3
+rasterio==1.4.3
+pycountry==26.2.16
 docker
