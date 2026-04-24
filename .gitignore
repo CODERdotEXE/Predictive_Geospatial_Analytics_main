@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+
+# Backend
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# OS generated files
+.DS_Store
+Thumbs.db

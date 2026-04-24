@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+geopandas==1.0.1
+shapely==2.0.6
+pandas==2.2.3
+numpy==1.26.4
+scikit-learn==1.5.2
+h3==4.1.2
+osmnx==2.0.1
+requests==2.32.3
+docker
